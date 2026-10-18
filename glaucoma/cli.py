@@ -63,6 +63,7 @@ def main(argv=None):
     p.add_argument("--max-hours", type=float, default=10)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--teacher", type=Path, help="Matching-fold model/ensemble for distillation")
+    p.add_argument("--initialize-from", type=Path, help="Same-fold global checkpoint for multi-view warm start")
     p = subs.add_parser("finalize")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--cv-dirs", type=Path, nargs=3, required=True)
@@ -159,7 +160,8 @@ def main(argv=None):
                 engine.fine_tune(args.data_root, config, args.output, fold, args.seed, args.epochs,
                                  args.workers, args.device, args.resume, args.teacher, budget, args.max_hours,
                                  performance_profile=args.performance_profile,
-                                 validation_batch_size=args.validation_batch_size, validation_workers=args.validation_workers)
+                                 validation_batch_size=args.validation_batch_size, validation_workers=args.validation_workers,
+                                 initialize_from=args.initialize_from)
             else:
                 import numpy as np
                 if any(not read_json(d / "status.json").get("complete") for d in args.cv_dirs):

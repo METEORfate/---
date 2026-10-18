@@ -15,12 +15,13 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from .audit import require_audit
-from .common import ARTIFACTS, Budget, ROOT, digest, exclusive_output, read_json, seed_all, sha256, versions, write_csv, write_json
+from .common import ARTIFACTS, Budget, ROOT, code_fingerprint, digest, exclusive_output, read_json, seed_all, sha256, versions, write_csv, write_json
 from .data import AgeTransform, ImageDataset, PREPROCESS_VERSION, load_rows, read_image, worker_seed
 from .metrics import metric_key, metrics
 from .models import FundusModel, SPECS, WEIGHTS, download_weights, load_checkpoint, save_checkpoint
 from .performance import execution_settings, load_profile
 from .pixel_cache import find_pixel_cache
+from .multiview import empty_diagnostics, image_count, image_dataset, move_images, view_diagnostics
 
 
 def device_for(name="auto"):
@@ -40,9 +41,11 @@ def synchronize(device):
         torch.cuda.synchronize()
 
 
-def loader(dataset, batch_size, workers, shuffle=False, seed=42):
+def loader(dataset, batch_size, workers, shuffle=False, seed=42, sampler=None):
     options = dict(batch_size=batch_size, shuffle=shuffle, num_workers=workers, pin_memory=torch.cuda.is_available(),
                    generator=torch.Generator().manual_seed(seed), worker_init_fn=worker_seed)
+    if sampler is not None:
+        options.update(sampler=sampler, shuffle=False)
     if workers:
         options.update(persistent_workers=True, prefetch_factor=2)
     return DataLoader(dataset, **options)
@@ -73,6 +76,8 @@ def save_predictions(path, rows, probabilities, folds=None):
 
 def extract_features(root, config, batch_size=None, workers=None, device="auto", split="train", budget=None,
                      performance_profile=None):
+    if config.get("multiview") or config.get("native_resolution"):
+        raise ValueError("Native-view configs use supervised training, not legacy resized feature caches")
     audit = require_audit(root)
     device = device_for(device)
     profile = load_profile(performance_profile, config, device) if performance_profile else None
@@ -221,12 +226,13 @@ def smoke(root, config, device="auto"):
     import tempfile
     device = device_for(device)
     rows = load_rows(root, "train")
-    chosen = [next(r for r in rows if r["label"] == label) for label in (0, 1)]
+    count = int(config.get("smoke_batch_size", 2))
+    chosen = [row for label in (0, 1) for row in [r for r in rows if r["label"] == label][:max(1, count//2)]]
     age = AgeTransform.fit([r["age"] for r in rows])
-    model = FundusModel(config, download_weights(config["model"])).configure_trainable(2 if config["model"] != "effnet" else -1).to(device)
-    data = loader(ImageDataset(chosen, config["size"], age), 2, 0)
+    model = FundusModel(config, download_weights(config["model"])).configure_trainable(config.get("tail_blocks", 2 if config["model"] != "effnet" else -1)).to(device)
+    data = loader(image_dataset(chosen, config, age), count, 0)
     images, ages, y, _ = next(iter(data))
-    images, ages, y = images.to(device), ages.to(device), y.to(device)
+    images, ages, y = move_images(images, device), ages.to(device), y.to(device)
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-5)
@@ -238,6 +244,7 @@ def smoke(root, config, device="auto"):
     scaler.step(optimizer)
     scaler.update()
     model.eval()
+    model.active_view_batch_size = 0  # Validation/inference retain the original numerical path.
     with torch.inference_mode(), autocast(device):
         expected = model(images, ages).float().cpu()
     output = ARTIFACTS / "smoke"
@@ -250,12 +257,13 @@ def smoke(root, config, device="auto"):
             actual = restored(images, ages).float().cpu()
         torch.testing.assert_close(expected, actual, atol=1e-5, rtol=1e-4)
     synchronize(device)
-    result = {"purpose": "implementation smoke test, not model performance", "train_images": 2,
+    result = {"purpose": "implementation smoke test, not model performance", "train_images": image_count(images), "config": config,
               "device": device, "gpu": torch.cuda.get_device_name() if device.startswith("cuda") else None,
               "loss": float(loss.detach()), "reload_max_abs_difference": float((actual-expected).abs().max()),
               "seconds": time.monotonic()-start, "peak_allocated_bytes": torch.cuda.max_memory_allocated() if device.startswith("cuda") else None,
               "versions": versions()}
-    write_json(output / f"{config['model']}_{device}_report.json", result)
+    suffix = "_multiview" if config.get("multiview") else "_native" if config.get("native_resolution") else ""
+    write_json(output / f"{config['model']}{suffix}_{device}_report.json", result)
     print(result, flush=True)
 
 
@@ -264,14 +272,19 @@ def build_pixel_cache(rows, size, output, budget=None):
     return build(rows, size, output, budget, workers=int(os.environ.get("GLAUCOMA_CACHE_WORKERS", "6")))
 
 
-def evaluate_loader(model, data, device, progress_path=None, epoch=None):
+def evaluate_loader(model, data, device, progress_path=None, epoch=None, budget=None):
     predictions, indices, labels = [], [], []
+    views = empty_diagnostics()
     model.eval()
+    model.active_view_batch_size = 0
     with torch.inference_mode():
         started = time.monotonic()
         for step, (images, age, y, ix) in enumerate(data, 1):
+            view_diagnostics(images, views)
+            if budget:
+                budget.check()
             with autocast(device):
-                logits = model(images.to(device, non_blocking=True), age.to(device, non_blocking=True))
+                logits = model(move_images(images, device), age.to(device, non_blocking=True))
             predictions.extend(torch.sigmoid(logits.double()).cpu().tolist())
             indices.extend(ix.tolist())
             labels.extend(y.tolist())
@@ -281,11 +294,14 @@ def evaluate_loader(model, data, device, progress_path=None, epoch=None):
                            "steps_per_epoch": len(data), "samples": len(indices), "seconds": seconds,
                            "images_per_second": len(indices)/max(seconds, 1e-6)})
                 print(f"validation epoch={epoch} step={step}/{len(data)}", flush=True)
+    if progress_path and views["images"]:
+        write_json(Path(progress_path).with_name("validation_views.json"), {"epoch": epoch, **views})
     return np.array(indices), np.array(predictions), metrics(labels, predictions)
 
 
 def training_mode(model, warmup):
     model.train()
+    model.active_view_batch_size = 0 if warmup else int(getattr(model, "performance_view_batch_size", 0))
     model.backbone.eval()
     if not warmup and model.kind != "effnet":
         for block in model.backbone.blocks:
@@ -295,7 +311,7 @@ def training_mode(model, warmup):
 
 def train_batches(model, data, optimizer, scaler, device, config, warmup=False, reduced_sync=False,
                   budget=None, deadline=None, teacher_predictor=None, rows=None, progress_path=None,
-                  epoch=1, max_epochs=1, warmup_batches=0):
+                  epoch=1, max_epochs=1, warmup_batches=0, record_order=False):
     """The production update loop, also used by isolated performance benchmarks."""
     training_mode(model, warmup)
     for parameter in model.backbone.parameters():
@@ -305,6 +321,8 @@ def train_batches(model, data, optimizer, scaler, device, config, warmup=False, 
     accumulation = config.get("accumulation", 8)
     loss_sum = torch.zeros((), device=device, dtype=torch.float64) if reduced_sync else 0.0
     count, waiting, updates, startup = 0, 0., 0, 0.
+    views = empty_diagnostics()
+    sample_order = []
     synchronize(device)
     started = previous = time.monotonic()
     measured_start, measured_count, interrupted = None, 0, False
@@ -321,7 +339,10 @@ def train_batches(model, data, optimizer, scaler, device, config, warmup=False, 
         if step == warmup_batches:
             synchronize(device)
             measured_start = time.monotonic()
-        images, ages, labels = images.to(device, non_blocking=True), ages.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        view_diagnostics(images, views)
+        if record_order:
+            sample_order.extend(indices.tolist())
+        images, ages, labels = move_images(images, device), ages.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         with autocast(device):
             if warmup:
                 with torch.no_grad():
@@ -350,12 +371,12 @@ def train_batches(model, data, optimizer, scaler, device, config, warmup=False, 
             optimizer.zero_grad(set_to_none=True)
             updates += int(scaler.get_scale() >= scale_before)
         if reduced_sync:
-            loss_sum.add_(loss.detach().double()*len(images))
+            loss_sum.add_(loss.detach().double()*image_count(images))
         else:
-            loss_sum += float(loss.detach())*len(images)
-        count += len(images)
+            loss_sum += float(loss.detach())*image_count(images)
+        count += image_count(images)
         if step >= warmup_batches:
-            measured_count += len(images)
+            measured_count += image_count(images)
         if progress_path and (step == 0 or (step+1) % 100 == 0):
             current_loss = float(loss_sum)/count
             elapsed = time.monotonic()-started
@@ -373,13 +394,14 @@ def train_batches(model, data, optimizer, scaler, device, config, warmup=False, 
     elapsed = time.monotonic()-started
     return {"loss": float(loss_sum)/max(count, 1), "count": count, "waiting": waiting,
             "seconds": elapsed, "startup_seconds": startup, "interrupted": interrupted,
-            "optimizer_steps": updates, "measured_images": measured_count,
+            "optimizer_steps": updates, "sample_order": sample_order if record_order else None,
+            "view_diagnostics": views, "measured_images": measured_count,
             "measured_seconds": time.monotonic()-measured_start if measured_start is not None else 0.}
 
 
 def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, device="auto", resume=False,
               teacher=None, budget=None, max_hours=10, performance_profile=None,
-              validation_batch_size=None, validation_workers=None):
+              validation_batch_size=None, validation_workers=None, initialize_from=None):
     audit = require_audit(root)
     seed_all(seed)
     device = device_for(device)
@@ -397,15 +419,40 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
     val_ix = np.array([], dtype=int) if fold == "full" else np.flatnonzero(folds == int(fold))
     age = AgeTransform.fit([rows[i]["age"] for i in fit_ix])
     model = FundusModel(config, download_weights(config["model"])).configure_trainable(config.get("tail_blocks", 2)).to(device)
+    model.performance_view_batch_size = int((profile or {}).get("view_encode_batch_size", 0))
+    if teacher and config.get("multiview"):
+        raise ValueError("Tensor distillation cannot reconstruct original-resolution local views")
+    initialization = None
+    if initialize_from:
+        initialization = sha256(initialize_from)
+        source = torch.load(initialize_from, map_location="cpu", weights_only=True)
+        meta = source["metadata"]
+        if (meta["fold"] != fold or meta.get("data_fingerprint") != audit["data_fingerprint"]
+                or meta.get("fold_fingerprint") != sha256(ARTIFACTS / "audit" / "folds.csv")
+                or source["age_transform"] != age.to_dict()
+                or meta.get("preprocess") != PREPROCESS_VERSION):
+            raise ValueError("Initialization must exclude the same holdout, with identical data, folds and age transform")
+        for key in ("model", "size", "use_age", "head", "head_standardize", "native_resolution", "view_version"):
+            if source["config"].get(key) != config.get(key):
+                raise ValueError(f"Initialization configuration differs: {key}")
+        restored = model.load_state_dict(source["state_dict"], strict=False)
+        if restored.unexpected_keys or any(not k.startswith("local_mil.") for k in restored.missing_keys):
+            raise ValueError("Initialization is not a compatible global-to-multiview checkpoint")
+    backbone_ids = {id(p) for p in model.backbone.parameters()}
     optimizer = torch.optim.AdamW([
         {"params": [p for p in model.backbone.parameters() if p.requires_grad], "lr": config.get("backbone_lr", 1e-5)},
-        {"params": model.head.parameters(), "lr": config.get("head_lr", 1e-3)}], weight_decay=0.01)
+        {"params": [p for p in model.parameters() if id(p) not in backbone_ids and p.requires_grad],
+         "lr": config.get("head_lr", 1e-3)}], weight_decay=0.01)
     max_epochs = int(epochs or config.get("epochs", 8))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=device.startswith("cuda"))
     run_signature = {"config": config, "fold": fold, "seed": seed, "epochs": max_epochs,
                      "fold_fingerprint": sha256(ARTIFACTS / "audit" / "folds.csv"),
                      "data": audit["data_fingerprint"], "teacher": sha256(teacher) if teacher else None}
+    if initialization:
+        run_signature["initialize_from_sha256"] = initialization
+    if config.get("native_resolution") or config.get("multiview"):
+        run_signature["view_code_fingerprint"] = code_fingerprint()
     last_path = output / "resume.pt"
     start, best, stale = 0, (-1.0, -1.0), 0
     if last_path.exists():
@@ -430,7 +477,16 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
                 or item[2]["metadata"].get("data_fingerprint") != audit["data_fingerprint"]):
                 raise ValueError("Teacher must exclude the same held-out fold; full-data teachers only distill full-data students")
     cache_path = ARTIFACTS / "pixel_cache" / f"train_{config['size']}_{audit['data_fingerprint'][:10]}.npy"
-    cache = find_pixel_cache(rows, config["size"], ARTIFACTS, audit["data_fingerprint"]) if settings["use_pixel_cache"] else None
+    native = bool(config.get("multiview") or config.get("native_resolution"))
+    if native:
+        verified = bool(profile and profile.get("native_view_cache_verified"))
+        settings["use_pixel_cache"] = bool(verified and profile.get("stages", {}).get("train", {}).get("accepted") and settings["use_pixel_cache"])
+        validation["use_pixel_cache"] = bool(verified and profile.get("stages", {}).get("validation", {}).get("accepted") and validation["use_pixel_cache"])
+        from .view_cache import find_view_cache
+        discover = lambda: find_view_cache(rows, config, ARTIFACTS, audit["data_fingerprint"])
+    else:
+        discover = lambda: find_pixel_cache(rows, config["size"], ARTIFACTS, audit["data_fingerprint"])
+    cache = discover() if settings["use_pixel_cache"] else None
     history_path = output / "history.json"
     history = read_json(history_path) if history_path.exists() else []
     started = time.monotonic()
@@ -441,7 +497,7 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
         cache = build_pixel_cache(rows, config["size"], cache_path, budget)
     for epoch in range(start, max_epochs):
         seed_all(seed + epoch)
-        train_data = loader(Subset(ImageDataset(rows, config["size"], age, True, cache), fit_ix.tolist()),
+        train_data = loader(Subset(image_dataset(rows, config, age, True, cache), fit_ix.tolist()),
                             config.get("batch_size", 4), workers, True, seed+epoch)
         warmup = epoch < config.get("head_warmup_epochs", 1)
         epoch_started = time.monotonic()
@@ -458,10 +514,10 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
         scheduler.step()
         result = None
         if len(val_ix):
-            validation_cache = find_pixel_cache(rows, config["size"], ARTIFACTS, audit["data_fingerprint"]) if validation["use_pixel_cache"] else None
-            data = loader(Subset(ImageDataset(rows, config["size"], age, False, validation_cache), val_ix.tolist()),
+            validation_cache = discover() if validation["use_pixel_cache"] else None
+            data = loader(Subset(image_dataset(rows, config, age, False, validation_cache), val_ix.tolist()),
                           validation["batch_size"], validation["workers"])
-            ix, pred, result = evaluate_loader(model, data, device, output / "progress.json", epoch+1)
+            ix, pred, result = evaluate_loader(model, data, device, output / "progress.json", epoch+1, budget)
             del data
             improved = metric_key(result) > best
         else:
@@ -472,8 +528,17 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
                     "versions": versions(), "holdout": result}
         metadata["execution"] = {"train": settings, "validation": validation}
         metadata["performance_profile"] = str(performance_profile) if performance_profile else None
+        metadata["view_encode_batch_size"] = model.performance_view_batch_size
         metadata["loader_workers"] = workers
-        metadata["pixel_cache"] = str(cache) if cache else None
+        metadata["pixel_cache"] = cache if isinstance(cache, dict) else str(cache) if cache else None
+        if initialization:
+            metadata["initialize_from_sha256"] = initialization
+        if native:
+            metadata["view_version"] = config.get("view_version")
+            metadata["native_resolution"] = True
+        if config.get("multiview"):
+            metadata["view_diagnostics"] = {"train": training["view_diagnostics"],
+                "validation": read_json(output / "validation_views.json") if len(val_ix) else None}
         if improved:
             if result:
                 best = metric_key(result)
@@ -489,7 +554,8 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, 
         os.replace(temp, last_path)
         seconds = time.monotonic() - epoch_started
         history.append({"epoch": epoch+1, "loss": training["loss"], "holdout": result,
-                        "seconds": seconds, "loader_wait_fraction": waiting/max(seconds, 1e-6)})
+                        "seconds": seconds, "loader_wait_fraction": waiting/max(seconds, 1e-6),
+                        "optimizer_steps": training["optimizer_steps"], "view_diagnostics": training["view_diagnostics"]})
         write_json(history_path, history)
         print(f"epoch {epoch+1}: {history[-1]}", flush=True)
         if stale >= config.get("patience", 3) and len(val_ix):

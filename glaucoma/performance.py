@@ -32,6 +32,9 @@ def load_profile(path, config, device):
     profile = read_json(path)
     if profile.get("format_version") != 1 or profile.get("identity") != profile_identity(config, device):
         raise ValueError("Performance profile hardware/software/model config mismatch; benchmark again")
+    packing = profile.get("view_encode_batch_size", 0)
+    if type(packing) is not int or packing < 0 or (packing and (config["model"] != "rfm" or not config.get("multiview"))):
+        raise ValueError("View packing profile is only verified for the RFM multi-view route")
     for stage, entry in profile.get("stages", {}).items():
         if stage not in ("train", "validation", "features") or not isinstance(entry.get("accepted"), bool):
             raise ValueError("Invalid performance profile stage")

@@ -124,10 +124,8 @@ class PerformanceIntegrationTests(unittest.TestCase):
         self.config["epochs"] = 2
         output = self.artifacts / "model"
         class StopInSecondEpoch:
-            calls = 0
             def check(self):
-                self.calls += 1
-                if self.calls > 6:
+                if (output / "resume.pt").exists():
                     raise TimeoutError("test interrupted after a saved epoch")
         with self.assertRaises(TimeoutError):
             engine.fine_tune(self.root, self.config, output, workers=0, device="cpu", budget=StopInSecondEpoch())

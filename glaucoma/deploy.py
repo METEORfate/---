@@ -16,6 +16,7 @@ from .data import ImageDataset, PREPROCESS_VERSION, decode_image, load_rows, rea
 from .engine import autocast, device_for, loader, save_predictions, synchronize
 from .metrics import metric_key, metrics, paired_bootstrap
 from .models import load_checkpoint
+from .multiview import flip_images, image_dataset, move_images, native_views
 
 
 class Predictor:
@@ -48,6 +49,8 @@ class Predictor:
     def predict_tensor(self, images, raw_ages):
         output = torch.zeros(len(images), device=self.device)
         for (model, age, _), weight in zip(self.entries, self.weights):
+            if model.config.get("multiview"):
+                raise ValueError("Multi-view prediction requires original image paths, not resized tensors")
             x = images.to(self.device)
             if x.shape[-2:] != (model.size, model.size):
                 x = F.interpolate(x, size=(model.size, model.size), mode="bicubic", align_corners=False, antialias=True).clamp(0, 1)
@@ -63,14 +66,21 @@ class Predictor:
     def predict(self, image_path, age):
         # Decode/crop once, then resize each branch exactly as during training.
         output = 0.0
-        decoded = decode_image(image_path, max(item[0].size for item in self.entries))
+        decoded_by_policy = {}
         for (model, transform, _), weight in zip(self.entries, self.weights):
-            image = torch.from_numpy(resize_image(decoded, model.size)).permute(2, 0, 1).float().div_(255).unsqueeze(0).to(self.device)
+            native = bool(model.config.get("native_resolution") or model.config.get("multiview"))
+            if native not in decoded_by_policy:
+                size = max(item[0].size for item in self.entries
+                           if bool(item[0].config.get("native_resolution") or item[0].config.get("multiview")) == native)
+                decoded_by_policy[native] = decode_image(image_path, size, full_decode=native)
+            decoded = decoded_by_policy[native]
+            views = native_views(decoded, model.size, local=bool(model.config.get("multiview")))
+            image = move_images({k: v.unsqueeze(0) for k, v in views.items()} if isinstance(views, dict) else views.unsqueeze(0), self.device)
             ages = torch.from_numpy(transform.transform([age])).to(self.device)
             with autocast(self.device):
                 p = torch.sigmoid(model(image, ages).double())
                 if self.tta:
-                    p = .5 * (p + torch.sigmoid(model(image.flip(-1), ages).double()))
+                    p = .5 * (p + torch.sigmoid(model(flip_images(image), ages).double()))
             output += weight * float(p.item())
         return {"Probability": output, "Pred_Label": int(output >= .5)}
 
@@ -111,14 +121,14 @@ def predict_split(root, artifact, split, output, batch_size=16, workers=2, devic
     total = np.zeros(len(rows), dtype=np.float64)
     # Separate resolution-specific loaders preserve exact training preprocessing.
     for (model, age, _), weight in zip(predictor.entries, predictor.weights):
-        data = loader(ImageDataset(rows, model.size, age), batch_size, workers)
+        data = loader(image_dataset(rows, model.config, age), batch_size, workers)
         with torch.inference_mode():
             for step, (images, ages, _, indices) in enumerate(data):
-                images, ages = images.to(predictor.device, non_blocking=True), ages.to(predictor.device, non_blocking=True)
+                images, ages = move_images(images, predictor.device), ages.to(predictor.device, non_blocking=True)
                 with autocast(predictor.device):
                     p = torch.sigmoid(model(images, ages).double())
                     if predictor.tta:
-                        p = .5 * (p + torch.sigmoid(model(images.flip(-1), ages).double()))
+                        p = .5 * (p + torch.sigmoid(model(flip_images(images), ages).double()))
                 total[indices.numpy()] += weight * p.cpu().numpy()
                 if (step+1) % 50 == 0:
                     print(f"predict {split} {min((step+1)*batch_size, len(rows))}/{len(rows)}", flush=True)

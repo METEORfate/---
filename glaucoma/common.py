@@ -118,6 +118,7 @@ class Budget:
         self.path = ARTIFACTS / "rfm_budget.json"
         self.used = read_json(self.path)["used_seconds"] if enabled and self.path.exists() else 0
         self.started = None
+        self.last_written = 0.0
 
     def __enter__(self):
         self.started = time.monotonic()
@@ -125,12 +126,18 @@ class Budget:
         return self
 
     def check(self):
+        if self.enabled and time.monotonic() - self.last_written >= 30:
+            self.persist()
         if self.enabled and self.used + time.monotonic() - self.started >= self.limit:
             raise TimeoutError("RFM cumulative 8-hour budget exhausted; retain the existing baseline.")
 
-    def __exit__(self, *exc):
+    def persist(self):
         if self.enabled:
             elapsed = time.monotonic() - self.started
             write_json(self.path, {"used_seconds": self.used + elapsed, "limit_seconds": self.limit,
                                    "accounting": "wall time including downloads, extraction, training and failures"})
+            self.last_written = time.monotonic()
+
+    def __exit__(self, *exc):
+        self.persist()
 

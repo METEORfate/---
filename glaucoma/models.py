@@ -159,8 +159,36 @@ class FundusModel(nn.Module):
             self.head = nn.Linear(dimension, 1)
         else:
             self.head = nn.Sequential(nn.Linear(dimension, 128), nn.GELU(), nn.Dropout(0.2), nn.Linear(128, 1))
+        if config.get("multiview"):
+            from .multiview import AttentionMIL
+            if int(config.get("local_chunk_size", 1)) < 1:
+                raise ValueError("local_chunk_size must be positive")
+            self.local_mil = AttentionMIL(self.feature_dim, self.use_age)
+        if config.get("gradient_checkpointing", False):
+            self.backbone.set_grad_checkpointing(True)
 
     def features(self, images):
+        if isinstance(images, dict):
+            if not self.config.get("multiview"):
+                raise ValueError("Multi-view input requires a multi-view model")
+            batch, views = images["local"].shape[:2]
+            flat = images["local"].flatten(0, 1)
+            valid = images["mask"].flatten().nonzero(as_tuple=True)[0]
+            packing = int(getattr(self, "active_view_batch_size", 0))
+            if packing:
+                joined = torch.cat([images["global"], flat[valid]], dim=0)
+                encoded = torch.cat([self.features(part) for part in joined.split(packing)], dim=0)
+                global_features = encoded[:batch]
+                local_features = encoded.new_zeros(batch * views, self.feature_dim).index_copy(0, valid, encoded[batch:])
+            else:
+                global_features = self.features(images["global"])
+                local_features = global_features.new_zeros(batch * views, self.feature_dim)
+                chunk = int(self.config.get("local_chunk_size", 1))
+                for indices in valid.split(chunk):
+                    if indices.numel():
+                        local_features = local_features.index_copy(0, indices, self.features(flat[indices]))
+            return {"global": global_features, "local": local_features.view(batch, views, -1),
+                    "mask": images["mask"], "coordinates": images["coordinates"]}
         x = (images - self.mean) / self.std
         if self.kind == "rfm":
             intermediates = self.backbone.forward_intermediates(x, intermediates_only=True,
@@ -170,6 +198,11 @@ class FundusModel(nn.Module):
         return self.backbone(x).float()
 
     def classify(self, features, age):
+        if isinstance(features, dict):
+            base = self.classify(features["global"], age)
+            residual, _ = self.local_mil(features["global"], features["local"],
+                                       features["coordinates"], features["mask"], age if self.use_age else None)
+            return base + residual
         x = torch.cat([features, age], dim=1) if self.use_age else features
         # Folded StandardScaler coefficients can be large; keep the tiny head FP32.
         with torch.autocast(x.device.type, enabled=False):

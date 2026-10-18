@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import time
 from collections import deque
@@ -17,6 +18,21 @@ from .data import PREPROCESS_VERSION, read_image
 def cache_signature(rows, size):
     return {"names": [r["name"] for r in rows], "size": size, "preprocess": PREPROCESS_VERSION,
             "files": digest([(r["file_size"], r["file_mtime_ns"]) for r in rows])}
+
+
+def find_pixel_cache(rows, size, artifacts, data_fingerprint):
+    """Only complete, aligned, current caches may be shared across execution stages."""
+    split = rows[0].get("split", "train") if rows else "train"
+    target = Path(artifacts) / "pixel_cache" / f"{split}_{size}_{data_fingerprint[:10]}.npy"
+    if not target.exists() or not target.with_suffix(".json").exists():
+        return None
+    if read_json(target.with_suffix(".json")) != cache_signature(rows, size):
+        return None
+    array = np.load(target, mmap_mode="r", allow_pickle=False)
+    if array.shape != (len(rows), size, size, 3) or array.dtype != np.uint8:
+        raise ValueError("Completed pixel cache has the wrong shape or dtype")
+    del array
+    return target
 
 
 def build_pixel_cache(rows, size, output, budget=None, workers=6, flush_every=256):
@@ -42,7 +58,8 @@ def build_pixel_cache(rows, size, output, budget=None, workers=6, flush_every=25
         required = int(np.prod(shape, dtype=np.int64))
         # A resumed array already occupies its full disk allocation.
         extra = max(0, required - temp.stat().st_size) if resume else max(0, required - (temp.stat().st_size if temp.exists() else 0))
-        if shutil.disk_usage(output.parent).free - extra < 30 * 1024**3:
+        metadata_reserve = 2*len(json.dumps(signature, ensure_ascii=False, indent=2).encode("utf-8")) + len(rows) + 8192
+        if shutil.disk_usage(output.parent).free - extra - metadata_reserve < 30 * 1024**3:
             raise RuntimeError("Pixel cache would leave less than 30GiB free")
         # Reuse a legacy allocation, but decode every image if it lacks a trusted bitmap.
         array = np.lib.format.open_memmap(temp, mode="r+" if temp.exists() else "w+", dtype=np.uint8, shape=shape)

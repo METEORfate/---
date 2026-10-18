@@ -43,8 +43,9 @@ def main(argv=None):
     p = subs.add_parser("features")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--split", choices=["train", "valid", "test"], default="train")
-    p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--batch-size", type=int)
+    p.add_argument("--workers", type=int)
+    p.add_argument("--performance-profile", type=Path)
     p = subs.add_parser("probe")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--features", type=Path, required=True)
@@ -55,7 +56,10 @@ def main(argv=None):
     p.add_argument("--fold", choices=["0", "1", "2", "full"], default="0")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs", type=int)
-    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--workers", type=int)
+    p.add_argument("--performance-profile", type=Path)
+    p.add_argument("--validation-batch-size", type=int)
+    p.add_argument("--validation-workers", type=int)
     p.add_argument("--max-hours", type=float, default=10)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--teacher", type=Path, help="Matching-fold model/ensemble for distillation")
@@ -63,7 +67,10 @@ def main(argv=None):
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--cv-dirs", type=Path, nargs=3, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--workers", type=int)
+    p.add_argument("--performance-profile", type=Path)
+    p.add_argument("--validation-batch-size", type=int)
+    p.add_argument("--validation-workers", type=int)
     p.add_argument("--max-hours", type=float, default=10)
     p.add_argument("--resume", action="store_true")
     for command in ("predict", "evaluate"):
@@ -141,7 +148,8 @@ def main(argv=None):
         config = config_at(args.config)
         with Budget(config["model"] == "rfm") as budget:
             if args.command == "features":
-                engine.extract_features(args.data_root, config, args.batch_size, args.workers, args.device, args.split, budget)
+                engine.extract_features(args.data_root, config, args.batch_size, args.workers, args.device, args.split, budget,
+                                        performance_profile=args.performance_profile)
             elif args.command == "probe":
                 engine.train_probe(args.data_root, config, args.features, args.output, budget)
             elif args.command == "train":
@@ -149,7 +157,9 @@ def main(argv=None):
                     parser.error("Full refits need explicit --epochs selected on train folds; prefer finalize")
                 fold = "full" if args.fold == "full" else int(args.fold)
                 engine.fine_tune(args.data_root, config, args.output, fold, args.seed, args.epochs,
-                                 args.workers, args.device, args.resume, args.teacher, budget, args.max_hours)
+                                 args.workers, args.device, args.resume, args.teacher, budget, args.max_hours,
+                                 performance_profile=args.performance_profile,
+                                 validation_batch_size=args.validation_batch_size, validation_workers=args.validation_workers)
             else:
                 import numpy as np
                 if any(not read_json(d / "status.json").get("complete") for d in args.cv_dirs):
@@ -165,7 +175,9 @@ def main(argv=None):
                     raise ValueError("CV model data/fold provenance no longer matches")
                 epochs = max(1, int(np.median([m["metadata"]["epoch"] for m in metas])))
                 engine.fine_tune(args.data_root, config, args.output, "full", 42, epochs,
-                                 args.workers, args.device, args.resume, None, budget, args.max_hours)
+                                 args.workers, args.device, args.resume, None, budget, args.max_hours,
+                                 performance_profile=args.performance_profile,
+                                 validation_batch_size=args.validation_batch_size, validation_workers=args.validation_workers)
     elif args.command == "nightly":
         from .nightly import run_nightly
         run_nightly(args.data_root, args.hours, args.workers, args.device)

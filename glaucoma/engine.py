@@ -19,6 +19,8 @@ from .common import ARTIFACTS, Budget, ROOT, digest, exclusive_output, read_json
 from .data import AgeTransform, ImageDataset, PREPROCESS_VERSION, load_rows, read_image, worker_seed
 from .metrics import metric_key, metrics
 from .models import FundusModel, SPECS, WEIGHTS, download_weights, load_checkpoint, save_checkpoint
+from .performance import execution_settings, load_profile
+from .pixel_cache import find_pixel_cache
 
 
 def device_for(name="auto"):
@@ -69,9 +71,13 @@ def save_predictions(path, rows, probabilities, folds=None):
     write_csv(path, records, ["Image_name", "Probability", "True_Label", "fold"])
 
 
-def extract_features(root, config, batch_size=16, workers=2, device="auto", split="train", budget=None):
+def extract_features(root, config, batch_size=None, workers=None, device="auto", split="train", budget=None,
+                     performance_profile=None):
     audit = require_audit(root)
     device = device_for(device)
+    profile = load_profile(performance_profile, config, device) if performance_profile else None
+    settings = execution_settings(config, "features", profile, workers, batch_size)
+    batch_size, workers = settings["batch_size"], settings["workers"]
     name = config["model"]
     weight = download_weights(name)
     size = config.get("size", SPECS[name]["size"])
@@ -99,7 +105,8 @@ def extract_features(root, config, batch_size=16, workers=2, device="auto", spli
         done = np.lib.format.open_memmap(completion, mode="r+" if completion.exists() else "w+", dtype=np.bool_, shape=(len(rows),))
         todo = np.flatnonzero(~done)
         model = FundusModel(config, weight).to(device).eval()
-        data = loader(Subset(ImageDataset(rows, size), todo.tolist()), batch_size, workers)
+        cache = find_pixel_cache(rows, size, ARTIFACTS, audit["data_fingerprint"]) if settings["use_pixel_cache"] else None
+        data = loader(Subset(ImageDataset(rows, size, cache=cache), todo.tolist()), batch_size, workers)
         processed, started, waiting, previous = 0, time.monotonic(), 0.0, time.monotonic()
         with torch.inference_mode():
             for images, _, _, indices in data:
@@ -121,7 +128,8 @@ def extract_features(root, config, batch_size=16, workers=2, device="auto", spli
                     print(f"features {name}/{split}: {processed}/{len(todo)}, {processed/(time.monotonic()-started):.1f} images/s", flush=True)
                 previous = time.monotonic()
         meta.update(complete=True, versions=versions(), extraction_seconds=time.monotonic()-started,
-                    loader_wait_fraction=waiting / max(time.monotonic()-started, 1e-6))
+                    loader_wait_fraction=waiting / max(time.monotonic()-started, 1e-6),
+                    execution=settings, pixel_cache=str(cache) if cache else None)
         write_json(meta_path, meta)
         print(f"features complete: {target}", flush=True)
     return target
@@ -276,11 +284,110 @@ def evaluate_loader(model, data, device, progress_path=None, epoch=None):
     return np.array(indices), np.array(predictions), metrics(labels, predictions)
 
 
-def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=2, device="auto", resume=False,
-              teacher=None, budget=None, max_hours=10):
+def training_mode(model, warmup):
+    model.train()
+    model.backbone.eval()
+    if not warmup and model.kind != "effnet":
+        for block in model.backbone.blocks:
+            if any(p.requires_grad for p in block.parameters()):
+                block.train()
+
+
+def train_batches(model, data, optimizer, scaler, device, config, warmup=False, reduced_sync=False,
+                  budget=None, deadline=None, teacher_predictor=None, rows=None, progress_path=None,
+                  epoch=1, max_epochs=1, warmup_batches=0):
+    """The production update loop, also used by isolated performance benchmarks."""
+    training_mode(model, warmup)
+    for parameter in model.backbone.parameters():
+        if parameter.requires_grad:
+            parameter.grad = None
+    optimizer.zero_grad(set_to_none=True)
+    accumulation = config.get("accumulation", 8)
+    loss_sum = torch.zeros((), device=device, dtype=torch.float64) if reduced_sync else 0.0
+    count, waiting, updates, startup = 0, 0., 0, 0.
+    synchronize(device)
+    started = previous = time.monotonic()
+    measured_start, measured_count, interrupted = None, 0, False
+    for step, (images, ages, labels, indices) in enumerate(data):
+        arrived = time.monotonic()
+        waiting += arrived-previous
+        if step == 0:
+            startup = arrived-started
+        if budget:
+            budget.check()
+        if deadline is not None and time.monotonic() >= deadline:
+            interrupted = True
+            break
+        if step == warmup_batches:
+            synchronize(device)
+            measured_start = time.monotonic()
+        images, ages, labels = images.to(device, non_blocking=True), ages.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        with autocast(device):
+            if warmup:
+                with torch.no_grad():
+                    features = model.features(images)
+                logits = model.classify(features, ages)
+            else:
+                logits = model(images, ages)
+            loss = nn.functional.binary_cross_entropy_with_logits(logits.float(), labels)
+            if teacher_predictor:
+                with torch.no_grad():
+                    soft = teacher_predictor.predict_tensor(images, [rows[i]["age"] for i in indices.tolist()])
+                soft_logits = torch.logit(soft.clamp(1e-6, 1-1e-6))
+                distill = nn.functional.binary_cross_entropy_with_logits(logits.float()/2, torch.sigmoid(soft_logits/2)) * 4
+                loss = .5 * loss + .5 * distill
+        if not torch.isfinite(loss):
+            raise FloatingPointError("Non-finite loss")
+        group_start = (step // accumulation) * accumulation
+        divisor = min(accumulation, len(data)-group_start)
+        scaler.scale(loss/divisor).backward()
+        if (step+1) % accumulation == 0 or step+1 == len(data):
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scale_before = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            updates += int(scaler.get_scale() >= scale_before)
+        if reduced_sync:
+            loss_sum.add_(loss.detach().double()*len(images))
+        else:
+            loss_sum += float(loss.detach())*len(images)
+        count += len(images)
+        if step >= warmup_batches:
+            measured_count += len(images)
+        if progress_path and (step == 0 or (step+1) % 100 == 0):
+            current_loss = float(loss_sum)/count
+            elapsed = time.monotonic()-started
+            print(f"epoch {epoch}/{max_epochs} step {step+1}/{len(data)} loss={current_loss:.5f}", flush=True)
+            write_json(progress_path, {"epoch": epoch, "step": step+1, "steps_per_epoch": len(data),
+                       "phase": "head_warmup" if warmup else "fine_tune", "samples": count, "seconds": elapsed,
+                       "images_per_second": count/max(elapsed, 1e-6), "loss": current_loss,
+                       "loader_wait_fraction": waiting/max(elapsed, 1e-6),
+                       "loader_wait_measurement": "host wait; asynchronous work may overlap" if reduced_sync else "synchronized batches",
+                       "peak_gpu_bytes": torch.cuda.max_memory_allocated() if str(device).startswith("cuda") else None})
+        if not reduced_sync:
+            synchronize(device)
+        previous = time.monotonic()
+    synchronize(device)
+    elapsed = time.monotonic()-started
+    return {"loss": float(loss_sum)/max(count, 1), "count": count, "waiting": waiting,
+            "seconds": elapsed, "startup_seconds": startup, "interrupted": interrupted,
+            "optimizer_steps": updates, "measured_images": measured_count,
+            "measured_seconds": time.monotonic()-measured_start if measured_start is not None else 0.}
+
+
+def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=None, device="auto", resume=False,
+              teacher=None, budget=None, max_hours=10, performance_profile=None,
+              validation_batch_size=None, validation_workers=None):
     audit = require_audit(root)
     seed_all(seed)
     device = device_for(device)
+    profile = load_profile(performance_profile, config, device) if performance_profile else None
+    settings = execution_settings(config, "train", profile, workers)
+    validation = execution_settings(config, "validation", profile,
+                                    validation_workers if validation_workers is not None else workers, validation_batch_size)
+    workers = settings["workers"]
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     rows = load_rows(root, "train")
@@ -322,85 +429,27 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=2, dev
             if (item[2]["metadata"]["fold"] != fold
                 or item[2]["metadata"].get("data_fingerprint") != audit["data_fingerprint"]):
                 raise ValueError("Teacher must exclude the same held-out fold; full-data teachers only distill full-data students")
-    cache = None
     cache_path = ARTIFACTS / "pixel_cache" / f"train_{config['size']}_{audit['data_fingerprint'][:10]}.npy"
-    if cache_path.exists() and cache_path.with_suffix(".json").exists():
-        expected = {"names": [r["name"] for r in rows], "size": config["size"], "preprocess": PREPROCESS_VERSION,
-                    "files": digest([(r["file_size"], r["file_mtime_ns"]) for r in rows])}
-        if read_json(cache_path.with_suffix(".json")) == expected:
-            cache = cache_path
+    cache = find_pixel_cache(rows, config["size"], ARTIFACTS, audit["data_fingerprint"]) if settings["use_pixel_cache"] else None
     history_path = output / "history.json"
     history = read_json(history_path) if history_path.exists() else []
     started = time.monotonic()
     interrupted = False
     # A stop during cache construction must not leave resumed training permanently on raw JPEGs.
-    if (cache is None and history and config.get("auto_pixel_cache", True)
+    if (cache is None and not performance_profile and settings["use_pixel_cache"] and history and config.get("auto_pixel_cache", True)
             and history[-1].get("loader_wait_fraction", 0) > .3):
         cache = build_pixel_cache(rows, config["size"], cache_path, budget)
     for epoch in range(start, max_epochs):
         seed_all(seed + epoch)
         train_data = loader(Subset(ImageDataset(rows, config["size"], age, True, cache), fit_ix.tolist()),
                             config.get("batch_size", 4), workers, True, seed+epoch)
-        model.train()
-        model.backbone.eval()  # Frozen dropout/BN statistics remain deterministic.
-        if epoch >= config.get("head_warmup_epochs", 1):
-            if model.kind != "effnet":
-                for block in model.backbone.blocks:
-                    if any(p.requires_grad for p in block.parameters()):
-                        block.train()
         warmup = epoch < config.get("head_warmup_epochs", 1)
-        for p in model.backbone.parameters():
-            if p.requires_grad:
-                p.grad = None
-        optimizer.zero_grad(set_to_none=True)
-        accumulation = config.get("accumulation", 8)
-        loss_sum, count, waiting = 0.0, 0, 0.0
-        epoch_started = previous = time.monotonic()
-        for step, (images, ages, labels, indices) in enumerate(train_data):
-            waiting += time.monotonic() - previous
-            if budget:
-                budget.check()
-            if time.monotonic() - started >= max_hours * 3600:
-                interrupted = True
-                break  # Partial epoch discarded on resume; only full-epoch states are saved.
-            images, ages, labels = images.to(device, non_blocking=True), ages.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            with autocast(device):
-                if warmup:
-                    with torch.no_grad():
-                        features = model.features(images)
-                    logits = model.classify(features, ages)
-                else:
-                    logits = model(images, ages)
-                loss = nn.functional.binary_cross_entropy_with_logits(logits.float(), labels)
-                if teacher_predictor:
-                    with torch.no_grad():
-                        soft = teacher_predictor.predict_tensor(images, [rows[i]["age"] for i in indices.tolist()])
-                    soft_logits = torch.logit(soft.clamp(1e-6, 1-1e-6))
-                    distill = nn.functional.binary_cross_entropy_with_logits(logits.float()/2, torch.sigmoid(soft_logits/2)) * 4
-                    loss = .5 * loss + .5 * distill
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Non-finite loss")
-            group_start = (step // accumulation) * accumulation
-            divisor = min(accumulation, len(train_data) - group_start)
-            scaler.scale(loss / divisor).backward()
-            if (step+1) % accumulation == 0 or step+1 == len(train_data):
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-            loss_sum += float(loss.detach()) * len(images)
-            count += len(images)
-            if step == 0 or (step+1) % 100 == 0:
-                print(f"epoch {epoch+1}/{max_epochs} step {step+1}/{len(train_data)} loss={loss_sum/count:.5f}", flush=True)
-                elapsed = time.monotonic() - epoch_started
-                write_json(output / "progress.json", {"epoch": epoch+1, "step": step+1,
-                           "steps_per_epoch": len(train_data), "phase": "head_warmup" if warmup else "fine_tune",
-                           "samples": count, "seconds": elapsed, "images_per_second": count/max(elapsed, 1e-6),
-                           "loss": loss_sum/count, "loader_wait_fraction": waiting/max(elapsed, 1e-6),
-                           "peak_gpu_bytes": torch.cuda.max_memory_allocated() if device.startswith("cuda") else None})
-            synchronize(device)
-            previous = time.monotonic()
+        epoch_started = time.monotonic()
+        training = train_batches(model, train_data, optimizer, scaler, device, config, warmup,
+                                 settings["reduced_sync"], budget, started+max_hours*3600,
+                                 teacher_predictor, rows, output / "progress.json", epoch+1, max_epochs)
+        interrupted = training["interrupted"]
+        waiting = training["waiting"]
         del train_data
         if interrupted:
             write_json(output / "status.json", {"complete": False, "reason": "session_time_budget", "last_complete_epoch": epoch,
@@ -409,8 +458,9 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=2, dev
         scheduler.step()
         result = None
         if len(val_ix):
-            data = loader(Subset(ImageDataset(rows, config["size"], age, False, cache), val_ix.tolist()),
-                          config.get("batch_size", 4), workers)
+            validation_cache = find_pixel_cache(rows, config["size"], ARTIFACTS, audit["data_fingerprint"]) if validation["use_pixel_cache"] else None
+            data = loader(Subset(ImageDataset(rows, config["size"], age, False, validation_cache), val_ix.tolist()),
+                          validation["batch_size"], validation["workers"])
             ix, pred, result = evaluate_loader(model, data, device, output / "progress.json", epoch+1)
             del data
             improved = metric_key(result) > best
@@ -420,6 +470,8 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=2, dev
                     "fold_fingerprint": run_signature["fold_fingerprint"],
                     "data_fingerprint": audit["data_fingerprint"], "preprocess": PREPROCESS_VERSION,
                     "versions": versions(), "holdout": result}
+        metadata["execution"] = {"train": settings, "validation": validation}
+        metadata["performance_profile"] = str(performance_profile) if performance_profile else None
         metadata["loader_workers"] = workers
         metadata["pixel_cache"] = str(cache) if cache else None
         if improved:
@@ -436,13 +488,13 @@ def fine_tune(root, config, output, fold=0, seed=42, epochs=None, workers=2, dev
         torch.save(state, temp)
         os.replace(temp, last_path)
         seconds = time.monotonic() - epoch_started
-        history.append({"epoch": epoch+1, "loss": loss_sum/count, "holdout": result,
+        history.append({"epoch": epoch+1, "loss": training["loss"], "holdout": result,
                         "seconds": seconds, "loader_wait_fraction": waiting/max(seconds, 1e-6)})
         write_json(history_path, history)
         print(f"epoch {epoch+1}: {history[-1]}", flush=True)
         if stale >= config.get("patience", 3) and len(val_ix):
             break
-        if waiting/max(seconds, 1e-6) > .3 and config.get("auto_pixel_cache", True) and cache is None:
+        if not performance_profile and settings["use_pixel_cache"] and waiting/max(seconds, 1e-6) > .3 and config.get("auto_pixel_cache", True) and cache is None:
             cache = build_pixel_cache(rows, config["size"], cache_path, budget)
     if not interrupted:
         write_json(output / "status.json", {"complete": True, "last_complete_epoch": len(history)})

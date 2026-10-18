@@ -127,6 +127,16 @@ python run.py export --model artifacts/fusion/ensemble.json --output delivery --
 
 实际执行结果见 `STATUS.md`，训练产物以各自 `report.json`、`history.json`、`status.json` 为准。代码可运行或随机权重 smoke test 不代表科学效果；未运行的配置不写成绩。
 
+2026-10-18 首轮 Green 第 0 折和 RFM 冻结三折已完成。主机下一轮补 Green 另两折，同事先回传已完成的 CNN 三折/全量模型，再做优胜配置第二种子第 0 折复验；见 [下一轮分工任务.md](下一轮分工任务.md)。以下命令会复核现有证据、续跑未完成折，并在三折完成后收集 OOF、配对比较；默认限时 3 小时，不调用官方 valid/test。
+
+```powershell
+$python = (Get-Content runtime.local.json -Raw | ConvertFrom-Json).python
+& $python -u scripts/review-results.py
+& $python -u scripts/run-green-cv.py --hours 3 --workers 4
+```
+
+队列状态见 `artifacts/green_cv/state.json`，逐批进度见 `artifacts/green_ft2/fold1/progress.json` 和 `fold2/progress.json`。已有队列运行时会拒绝重复启动；时限到达后按完整 epoch 续跑，再次执行同一命令开启一次新的有界会话，不会自动跨天重启。
+
 按用户确认允许所有预训练权重执行。额外外部标注数据、valid/test 训练均未启用。权重来源、SHA256 和许可证随下载记录。Green 使用场景按高校非商业研究理解，具体许可见 `weights/green_LICENSE.txt`。
 
 计划节奏：10/17–19 基线，10/20–26 微调及挑战，10/27–11/1 OOF/融合，11/2–5 全量重训及部署，11/6 18:00 前冻结提交。每天最多 2 次比赛提交；本程序不会自动上传或访问比赛账号。
@@ -153,10 +163,30 @@ Green 392 的无损像素缓存约 23.7GB，覆盖全部 train，包括内部验
 $python = (Get-Content runtime.local.json -Raw | ConvertFrom-Json).python
 # 单独构建或继续缓存
 & $python -u scripts/build-pixel-cache.py --workers 6
-# 用同一组开发折图片比较原图与缓存的训练速度；不更新模型
+# 使用临时模型副本测速；会更新副本，不覆盖正式模型
 & $python -u scripts/benchmark-training-io.py --count 512
 ```
 
-缓存进度为 `artifacts/pixel_cache/train_392_917ca8a7f7.progress.json`，速度与像素一致性报告为 `artifacts/acceleration/training_io_benchmark.json`。读取工作进程数会记录在后续检查点中。训练缓存不进入交付包，训练提速不能作为 T4 单张推理时延的证明。
+缓存进度为 `artifacts/pixel_cache/train_392_917ca8a7f7.progress.json`。原先的 `artifacts/acceleration/training_io_benchmark.json` 保留为历史短基准；新的报告位于 `artifacts/acceleration/performance/report.json`。读取工作进程数会记录在后续检查点中。训练缓存不进入交付包，训练提速不能作为 T4 单张推理时延的证明。
 
-`scripts/complete-acceleration.py` 用于本次已暂停会话：备份完整检查点、构建缓存、实测并选择读取并发，再按原会话截止时间续训。已有主训练运行时会拒绝重复启动。
+`scripts/complete-acceleration.py` 是上一轮暂停会话使用的一次性恢复工具；后续使用下面的独立测速流程，不自动重启训练。
+
+## 可复用性能配置
+
+测速入口支持 `--config`、`--checkpoint`、`--fold` 和 `--stages train validation features`，Green、CNN、RFM 共用。检查点必须与配置和折号一致；只读取 train 及其内部划分，不访问官方 valid/test。训练测速保留每批 4 张、累积 8 批，包含真实优化器更新和临时保存。
+
+```powershell
+$python = (Get-Content runtime.local.json -Raw | ConvertFrom-Json).python
+# 等现有队列自然结束；取得训练队列互斥后才开始最多 30 分钟的测速
+& $python -u scripts/benchmark-training-io.py --wait-for-idle --max-minutes 30
+# 后续训练显式启用；未传此参数时沿用原有执行方式
+& $python run.py train --config configs/green_ft2.json --fold 0 --output artifacts/green_next/fold0 --workers 4 --performance-profile artifacts/acceleration/performance/profile.json
+```
+
+每项候选做三次交替配对测量，固定样本和初始状态，排除前 8 个启动批次另报吞吐；净耗时判断包括启动、数据传输、写出和缓存准备。推荐条件为中位吞吐至少增加 10%、预计净耗时减少、预测顺序一致、概率最大差及 AUROC/AUPRC 差均不超过 0.001；训练还核对更新次数和参数。报告是短样本外推，不代表完整 epoch 实测。
+
+验证与特征提取分别尝试批量 4/8/16/32 和读取进程 0/2/4，显存不足只淘汰当前候选。未通过的阶段使用报告记录的基准配置。`--validation-batch-size`、`--validation-workers` 可覆盖训练中的内部验证设置；显式 `--workers` 优先于配置，并同时覆盖验证读取并发，除非另传 `--validation-workers`。`features` 支持相同 `--performance-profile` 及显式 `--batch-size`、`--workers`。性能配置绑定完整模型配置、硬件和软件版本，不能直接移到另一台电脑或另一份模型配置使用。
+
+训练、内部验证、冻结特征提取共用完整缓存的签名、形状和类型检查。392 缓存可复用；其他尺寸不预建。如需评估并构建，加 `--build-cache`，先做小样本测量，再按预计剩余任务判断回本、30GiB 空间预留及会话剩余时间。可用 `--expected-passes` 指定后续遍历次数；默认训练/验证按配置轮数，特征提取按一次估计。未建好全量缓存时，不发布依赖该缓存的推荐。使用性能配置时不再触发旧的首轮慢读后自动建缓存逻辑。
+
+报告另列测速自身的时间成本。优化能否抵偿这项一次性成本，应结合之后实际复用次数判断。GPU 测速未完成、未测模型或未达门槛时，不填写新增加速成绩。

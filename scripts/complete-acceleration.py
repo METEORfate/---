@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,8 @@ from glaucoma.common import ARTIFACTS, exclusive_output, read_json, sha256, writ
 
 def main():
     output = ARTIFACTS / "acceleration"
-    with exclusive_output(output / "run.lock"):
+    with exclusive_output(output / "legacy_run.lock"), ExitStack() as training_locks:
+        training_locks.enter_context(exclusive_output(output / "run.lock"))
         state = {"status": "running", "phase": "backup_checkpoint"}
         def phase(name):
             state["phase"] = name
@@ -27,6 +29,9 @@ def main():
             if main_state["status"] == "running":
                 raise RuntimeError("Pause the original study at a completed checkpoint first")
             deadline = main_state["deadline_epoch"]
+            if deadline <= time.time():
+                state.update(status="complete", phase=None, resume_reason="Original session deadline reached; use the standalone benchmark for future tasks")
+                return
             backup = output / "checkpoint_before"
             backup.mkdir(parents=True, exist_ok=True)
             hashes = {}
@@ -40,12 +45,28 @@ def main():
             phase("build_lossless_cache")
             run("scripts/build-pixel-cache.py", "--workers", 6)
             phase("benchmark_raw_vs_cache")
-            run("scripts/benchmark-training-io.py", "--count", 512)
-            benchmark = read_json(output / "training_io_benchmark.json")
-            cached = [r for r in benchmark["results"] if r["input"] == "cache"]
-            best = max(cached, key=lambda r: r["images_per_second"])
-            state.update(selected_workers=best["workers"], speedup=benchmark["cache_speedup_vs_raw"],
-                         pixel_equality=benchmark["pixel_and_seeded_augmentation_equality"])
+            # The independent benchmark acquires this lock and the other queue locks itself.
+            training_locks.close()
+            run("scripts/benchmark-training-io.py", "--count", 512, "--stages", "train", "--max-minutes",
+                max(.001, min(30, (deadline-time.time())/60)))
+            training_locks.enter_context(exclusive_output(output / "run.lock"))
+            if (output / "performance" / "profile.json").exists():
+                profile = read_json(output / "performance" / "profile.json")
+                benchmark = read_json(output / "performance" / "report.json")
+                entry = profile["stages"].get("train", {})
+                best = {"workers": entry.get("settings", {}).get("workers", 4)}
+                stage = benchmark["stages"].get("train", {})
+                state.update(selected_workers=best["workers"],
+                             speedup=stage.get("recommendation", {}).get("speedup", 1.),
+                             pixel_equality=stage.get("pixel_equality", "not measured"),
+                             performance_profile=str(output / "performance" / "profile.json"))
+            else:
+                # Compatibility with historical, already-recorded IO reports.
+                benchmark = read_json(output / "training_io_benchmark.json")
+                cached = [r for r in benchmark["results"] if r["input"] == "cache"]
+                best = max(cached, key=lambda r: r["images_per_second"])
+                state.update(selected_workers=best["workers"], speedup=benchmark["cache_speedup_vs_raw"],
+                             pixel_equality=benchmark["pixel_and_seeded_augmentation_equality"])
             for name in ("model.pt", "resume.pt"):
                 if sha256(ARTIFACTS / "green_ft2" / "fold0" / name) != hashes[name]:
                     raise RuntimeError("A benchmark modified the original checkpoint")

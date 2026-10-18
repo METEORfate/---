@@ -137,7 +137,7 @@ $python = (Get-Content runtime.local.json -Raw | ConvertFrom-Json).python
 
 队列状态见 `artifacts/green_cv/state.json`，逐批进度见 `artifacts/green_ft2/fold1/progress.json` 和 `fold2/progress.json`。已有队列运行时会拒绝重复启动；时限到达后按完整 epoch 续跑，再次执行同一命令开启一次新的有界会话，不会自动跨天重启。
 
-按用户确认允许所有预训练权重执行。额外外部标注数据、valid/test 训练均未启用。权重来源、SHA256 和许可证随下载记录。Green 使用场景按高校非商业研究理解，具体许可见 `weights/green_LICENSE.txt`。
+按用户确认允许所有预训练权重执行。外部标注数据与 valid/test 训练均未启用——前者是**主办方赛规**禁止（赛题说明「4.其他约束」：只允许使用主办方提供的训练数据集，不允许外部标注数据），后者是防泄漏的评测纪律，两者都不由项目自行放宽。权重来源、SHA256 和许可证随下载记录。Green 使用场景按高校非商业研究理解，具体许可见 `weights/green_LICENSE.txt`。
 
 计划节奏：10/17–19 基线，10/20–26 微调及挑战，10/27–11/1 OOF/融合，11/2–5 全量重训及部署，11/6 18:00 前冻结提交。每天最多 2 次比赛提交；本程序不会自动上传或访问比赛账号。
 

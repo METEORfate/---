@@ -1,0 +1,10 @@
+# Install CUDA wheels with scripts/bootstrap.ps1 first.
+torch==2.10.0
+torchvision==0.25.0
+timm==1.0.24
+numpy>=1.26.4,<3
+Pillow>=11.1,<13
+scikit-learn>=1.6,<2
+requests>=2.32,<3
+socksio==1.0.0
+

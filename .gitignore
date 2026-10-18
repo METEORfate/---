@@ -1,0 +1,13 @@
+.venv/
+.venv-check/
+.cache/
+glaucoma_first/
+*.zip
+artifacts/
+weights/
+__pycache__/
+*.pyc
+.env
+runtime.local.json
+handoff/
+

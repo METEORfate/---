@@ -1,0 +1,5 @@
+{
+  "model": "green", "size": 392, "use_age": true, "head": "mlp", "head_standardize": true,
+  "tail_blocks": 0, "epochs": 30, "batch_size": 512, "learning_rate": 0.001,
+  "weight_decay": 0.01, "patience": 6
+}

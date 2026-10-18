@@ -1,0 +1,5 @@
+{
+  "model": "rfm", "size": 336, "use_age": true, "head": "linear", "tail_blocks": 2,
+  "epochs": 6, "batch_size": 4, "accumulation": 8, "head_warmup_epochs": 1,
+  "backbone_lr": 0.00001, "head_lr": 0.001, "patience": 2, "auto_pixel_cache": false
+}

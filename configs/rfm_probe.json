@@ -1,0 +1,3 @@
+{
+  "model": "rfm", "size": 336, "use_age": true, "head": "linear", "tail_blocks": 0
+}

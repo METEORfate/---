@@ -1,0 +1,15 @@
+{
+  "mode": "plan3",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "dependencies": [],
+  "output": "artifacts/plan3/collect",
+  "task": "collect",
+  "inputs": [
+    "deps/cv0/artifacts/plan3/rfm448-fold0",
+    "deps/cv1/artifacts/plan3/rfm448-fold1",
+    "deps/cv2/artifacts/plan3/rfm448-fold2"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "mode": "plan3", "task": "benchmark", "annotation_policy": "pilot400",
+  "annotations": "artifacts/plan3_inputs/annotations_pilot400_20261020",
+  "seed": 42, "workers": 2, "audit_workers": 16,
+  "dependencies": [], "resume": false, "fold": 0,
+  "config": "configs/plan3/rfm448.json", "benchmark_repeats": 3,
+  "max_hours": 2, "output": "artifacts/plan3/profile-rfm448-f0"
+}

@@ -10,4 +10,18 @@ __pycache__/
 .env
 runtime.local.json
 handoff/
+kaggle.local.json
+.kaggle/
+kaggle.json
+credentials.json
+
+# Local assistant history and scratch notebook
+.workbuddy-ai/
+WB/tmp.ipynb
+
+# Generated per-image audit data and source-image contact sheets
+WB/audit/*.csv
+WB/audit/*.npy
+WB/audit/s1_keys.json
+WB/audit/hard_cases/
 

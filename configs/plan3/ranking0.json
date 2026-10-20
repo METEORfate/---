@@ -1,0 +1,19 @@
+{
+  "model": "effnet",
+  "size": 512,
+  "view": "global",
+  "requires_initialization": true,
+  "use_age": true,
+  "epochs": 4,
+  "patience": 4,
+  "batch_size": 4,
+  "accumulation": 8,
+  "head_warmup_epochs": 0,
+  "backbone_lr": 0.00002,
+  "head_lr": 0.0002,
+  "ema_decay": 0.999,
+  "gradient_checkpointing": true,
+  "pretrained": "weights/effnet_source.json",
+  "ranking_weight": 0,
+  "paired_sampling": true
+}

@@ -1,0 +1,13 @@
+{
+  "mode": "train",
+  "config": "configs/rfm_p1_global.json",
+  "fold": 1,
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "output": "artifacts/kaggle_train/rfm_p1/fold1",
+  "resume": false,
+  "resume_kernel": null,
+  "initialize_from": null,
+  "auto_pixel_cache": false
+}

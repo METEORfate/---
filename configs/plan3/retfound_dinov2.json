@@ -1,0 +1,16 @@
+{
+  "model": "retfound_dinov2",
+  "size": 518,
+  "view": "global",
+  "use_age": true,
+  "epochs": 24,
+  "patience": 4,
+  "batch_size": 4,
+  "accumulation": 8,
+  "head_warmup_epochs": 1,
+  "backbone_lr": 0.000005,
+  "head_lr": 0.001,
+  "ema_decay": 0.999,
+  "gradient_checkpointing": true,
+  "pretrained": "weights/retfound_dinov2_source.json"
+}

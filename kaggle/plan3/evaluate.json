@@ -1,0 +1,12 @@
+{
+  "mode": "plan3",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "dependencies": [],
+  "output": "artifacts/plan3/evaluate",
+  "task": "evaluate",
+  "artifact": "deps/fusion/artifacts/plan3/fuse/ensemble.json",
+  "ticket": "artifacts/plan3_inputs/candidate-ticket.json"
+}

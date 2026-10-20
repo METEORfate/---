@@ -1,0 +1,17 @@
+{
+  "model": "rfm",
+  "size": 672,
+  "requires_initialization": true,
+  "view": "global",
+  "use_age": true,
+  "epochs": 6,
+  "patience": 4,
+  "batch_size": 4,
+  "accumulation": 8,
+  "head_warmup_epochs": 0,
+  "backbone_lr": 0.0000033333333333333337,
+  "head_lr": 0.0003333333333333333,
+  "ema_decay": 0.999,
+  "gradient_checkpointing": true,
+  "pretrained": "weights/rfm_source.json"
+}

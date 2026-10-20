@@ -1,0 +1,20 @@
+{
+  "format": "csv",
+  "version": "colleague-disc-v1",
+  "coordinate_space": "exif_transposed_original_pixels_xyxy_half_open",
+  "columns": {
+    "Image_name": "Image_name",
+    "width": "width",
+    "height": "height",
+    "x_min": "x_min",
+    "y_min": "y_min",
+    "x_max": "x_max",
+    "y_max": "y_max",
+    "status": "status"
+  },
+  "statuses": {
+    "valid": "valid",
+    "unclear": "unclear",
+    "unlocatable": "unlocatable"
+  }
+}

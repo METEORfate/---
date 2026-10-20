@@ -1,0 +1,15 @@
+{
+  "mode": "plan3",
+  "annotation_policy": "pilot400",
+  "annotations": "artifacts/plan3_inputs/annotations_pilot400_20261020",
+  "seed": 42,
+  "workers": 2,
+  "audit_workers": 16,
+  "dependencies": [],
+  "resume": false,
+  "task": "locator",
+  "fold": 0,
+  "config": "configs/plan3/locator.json",
+  "max_hours": 3,
+  "output": "artifacts/plan3/pilot400-locator-f0"
+}

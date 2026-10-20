@@ -1,0 +1,17 @@
+{
+  "mode": "plan3",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "dependencies": [],
+  "output": "artifacts/plan3/finalize",
+  "task": "finalize",
+  "fold": "full",
+  "config": "configs/plan3/rfm448.json",
+  "cv_models": [
+    "deps/cv0/artifacts/plan3/rfm448-fold0/model.pt",
+    "deps/cv1/artifacts/plan3/rfm448-fold1/model.pt",
+    "deps/cv2/artifacts/plan3/rfm448-fold2/model.pt"
+  ]
+}

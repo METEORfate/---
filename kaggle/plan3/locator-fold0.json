@@ -1,0 +1,13 @@
+{
+  "mode": "plan3",
+  "task": "locator",
+  "fold": 0,
+  "config": "configs/plan3/locator.json",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "output": "artifacts/plan3/locator-fold0",
+  "resume": false,
+  "dependencies": []
+}

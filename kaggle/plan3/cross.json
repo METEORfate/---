@@ -1,0 +1,15 @@
+{
+  "mode": "plan3",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "dependencies": [],
+  "output": "artifacts/plan3/cross",
+  "task": "train",
+  "fold": 0,
+  "config": "configs/plan3/cross.json",
+  "initialize_from": "deps/global/artifacts/plan3/effnet512-fold0/model.pt",
+  "locator": "deps/locator/artifacts/plan3/locator-fold0/model.pt",
+  "locator_review": "artifacts/plan3_inputs/review-fold0.json"
+}

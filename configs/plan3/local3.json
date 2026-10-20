@@ -1,0 +1,20 @@
+{
+  "model": "effnet",
+  "size": 512,
+  "view": "local",
+  "use_age": true,
+  "epochs": 24,
+  "patience": 4,
+  "batch_size": 4,
+  "accumulation": 8,
+  "head_warmup_epochs": 1,
+  "backbone_lr": 0.0001,
+  "head_lr": 0.001,
+  "ema_decay": 0.999,
+  "gradient_checkpointing": true,
+  "pretrained": "weights/effnet_source.json",
+  "roi_scales": [
+    3
+  ],
+  "local_size": 512
+}

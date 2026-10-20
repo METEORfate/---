@@ -1,0 +1,16 @@
+{
+  "model": "green",
+  "size": 392,
+  "use_age": true,
+  "head": "linear",
+  "tail_blocks": -1,
+  "epochs": 10,
+  "batch_size": 4,
+  "accumulation": 8,
+  "head_warmup_epochs": 1,
+  "backbone_lr": 0.00003,
+  "head_lr": 0.001,
+  "layer_decay": 0.75,
+  "patience": 3,
+  "auto_pixel_cache": true
+}

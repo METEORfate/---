@@ -1,0 +1,12 @@
+{
+  "mode": "plan3",
+  "seed": 42,
+  "workers": 2,
+  "max_hours": 10,
+  "annotations": "artifacts/plan3_inputs/annotations",
+  "dependencies": [],
+  "output": "artifacts/plan3/hard-negatives",
+  "task": "hard-negatives",
+  "fold": 0,
+  "inner_oof": "deps/inner/artifacts/plan3/inner-fold0/oof.csv"
+}

@@ -1,0 +1,7 @@
+# Keep Kaggle's matched CUDA torch/torchvision pair; record actual versions per run.
+timm==1.0.24
+numpy>=1.26.4,<3
+Pillow>=11.1,<13
+scikit-learn>=1.6,<2
+requests>=2.32,<3
+socksio==1.0.0

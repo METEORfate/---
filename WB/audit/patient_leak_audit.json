@@ -1,0 +1,130 @@
+{
+  "patient_proxy": {
+    "n_rows": 51396,
+    "n_blocks": 27231,
+    "n_proxy_patients": 27959,
+    "block_len_hist": {
+      "1": 4330,
+      "2": 22192,
+      "3": 187,
+      "4": 503,
+      "5": 5,
+      "6": 14
+    },
+    "pair_label_agreement": 0.9662072790886206,
+    "random_baseline_agreement": 0.9375990914869392,
+    "z_score": 18.106616770537023,
+    "pairs": 23437
+  },
+  "green_ft2_leakage": {
+    "overall": {
+      "auroc": 0.9542044778511483,
+      "auprc": 0.5962084725637175,
+      "n": 51396,
+      "positive": 1657
+    },
+    "has_fellow_eye_in_train": {
+      "auroc": 0.9585208515816092,
+      "auprc": 0.6149807349289695,
+      "n": 31278,
+      "positive": 1024
+    },
+    "fellow_eye_also_holdout": {
+      "auroc": 0.945735888287563,
+      "auprc": 0.5484705640043513,
+      "n": 15596,
+      "positive": 484
+    },
+    "no_partner": {
+      "auroc": 0.9546684428701442,
+      "auprc": 0.6348862307268939,
+      "n": 4522,
+      "positive": 149
+    },
+    "fraction_holdout_with_partner_in_train": 0.6085687602148027,
+    "fraction_holdout_with_partner": 0.91201649933847
+  },
+  "green_ft2_leakage_per_fold": {
+    "0": {
+      "all": {
+        "auroc": 0.9548064063565321,
+        "auprc": 0.5980920156075975,
+        "n": 17132,
+        "positive": 552
+      },
+      "leaked": {
+        "auroc": 0.9555158714411065,
+        "auprc": 0.6202038249025039,
+        "n": 10374,
+        "positive": 339
+      },
+      "clean": {
+        "auroc": 0.9533079993042404,
+        "auprc": 0.527816663665055,
+        "n": 5212,
+        "positive": 164
+      }
+    },
+    "1": {
+      "all": {
+        "auroc": 0.9547924796645995,
+        "auprc": 0.5996535793705143,
+        "n": 17133,
+        "positive": 553
+      },
+      "leaked": {
+        "auroc": 0.9608823557762981,
+        "auprc": 0.6157017738475716,
+        "n": 10479,
+        "positive": 327
+      },
+      "clean": {
+        "auroc": 0.9450287659974171,
+        "auprc": 0.5865965644399829,
+        "n": 5180,
+        "positive": 170
+      }
+    },
+    "2": {
+      "all": {
+        "auroc": 0.9559116277707699,
+        "auprc": 0.6059699373557618,
+        "n": 17131,
+        "positive": 552
+      },
+      "leaked": {
+        "auroc": 0.9612090613004601,
+        "auprc": 0.6295020763476743,
+        "n": 10425,
+        "positive": 358
+      },
+      "clean": {
+        "auroc": 0.9429982851866507,
+        "auprc": 0.541026775561955,
+        "n": 5204,
+        "positive": 150
+      }
+    }
+  },
+  "p1_fold0_leakage": {
+    "all": {
+      "auroc": 0.9733468383419872,
+      "auprc": 0.7126894867175109,
+      "n": 17132,
+      "positive": 552
+    },
+    "leaked": {
+      "auroc": 0.97104117888276,
+      "auprc": 0.7207450068196997,
+      "n": 10374,
+      "positive": 339
+    },
+    "clean": {
+      "auroc": 0.9762692783425456,
+      "auprc": 0.6935268729339708,
+      "n": 5212,
+      "positive": 164
+    },
+    "fraction_with_partner_in_train": 0.6055335045528835
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "mode": "plan3",
+  "annotation_policy": "pilot400",
+  "annotations": "artifacts/plan3_inputs/annotations_pilot400_20261020",
+  "seed": 42,
+  "workers": 2,
+  "dependencies": [],
+  "resume": false,
+  "task": "capacity",
+  "fold": 0,
+  "config": "configs/plan3/rfm448.json",
+  "max_hours": 0.5,
+  "output": "artifacts/plan3/pilot400-capacity-rfm-f0"
+}
